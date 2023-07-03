@@ -16,6 +16,8 @@
 
 #define IS_BROADCAST_ADDR(addr) (memcmp(addr, s_broadcast_mac, ESP_NOW_ETH_ALEN) == 0)
 
+#define ESPNOW_CAST_SEND_DELAY 30
+
 typedef enum {
     ESPNOW_SEND_CB,
     ESPNOW_RECV_CB,

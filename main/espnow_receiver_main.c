@@ -46,7 +46,7 @@ static void espnow_receiver_deinit(espnow_send_param_t *send_param);
 struct timeval tv_now;
 int64_t time_us_start;
 int64_t time_us_end;
-
+uint8_t system_stage = ESP_RECV_STATE_AWAITING;
 
 /* WiFi should start before using ESPNOW */
 static void espnow_recv_wifi_init(void)
@@ -81,6 +81,7 @@ static void espnow_device_send_cb(const uint8_t *mac_addr, esp_now_send_status_t
     evt.id = ESPNOW_SEND_CB;
     memcpy(send_cb->mac_addr, mac_addr, ESP_NOW_ETH_ALEN);
     send_cb->status = status;
+    send_cb->stage = system_stage;
     if (xQueueSend(s_espnow_queue, &evt, ESPNOW_MAXDELAY) != pdTRUE) {
         ESP_LOGW(TAG, "Send send queue fail");
     }
@@ -147,6 +148,7 @@ void espnow_recv_data_prepare(espnow_send_param_t *send_param)
 
     assert(send_param->len >= sizeof(espnow_data_t));
 
+    // buf->type = IS_BROADCAST_ADDR(send_param->dest_mac) ? ESPNOW_DATA_BROADCAST : ESPNOW_DATA_UNICAST;
     buf->type = IS_BROADCAST_ADDR(send_param->dest_mac) ? ESPNOW_DATA_BROADCAST : ESPNOW_DATA_UNICAST;
     buf->state = send_param->state;
     buf->seq_num = s_espnow_seq[buf->type]++;
@@ -164,7 +166,6 @@ static void espnow_recv_task(void *pvParameter)
     uint16_t recv_seq = 0;
     int recv_magic = 0;
     bool is_broadcast = false;
-    uint8_t system_stage = ESP_RECV_STATE_AWAITING;
     int ret;
 
     vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -189,6 +190,9 @@ static void espnow_recv_task(void *pvParameter)
                 if (system_stage == ESP_RECV_STATE_CONNECTED /*|| time out */ ) {
                     break;
                 }
+                if (system_stage < ESP_RECV_STATE_CONNECTED && system_stage != send_cb->stage /*|| time out */ ) {
+                    break;
+                }
                 /*
                 if (!is_broadcast) {
                     send_param->count--;
@@ -200,15 +204,14 @@ static void espnow_recv_task(void *pvParameter)
                 }
                 */
                 /* Delay a while before sending the next data. */
-                /*
                 if (send_param->delay > 0) {
                     vTaskDelay(send_param->delay/portTICK_PERIOD_MS);
                 }
-                */ 
                 // ESP_LOGI(TAG, "send data to "MACSTR"", MAC2STR(send_cb->mac_addr));
                 // keep resend here
                 memcpy(send_param->dest_mac, send_cb->mac_addr, ESP_NOW_ETH_ALEN);
                 espnow_recv_data_prepare(send_param);
+                ESP_LOGI(TAG, "Resend data to "MACSTR"", MAC2STR(send_cb->mac_addr));
 
                 /* Send the next data after the previous data is sent. */
                 if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
@@ -227,7 +230,7 @@ static void espnow_recv_task(void *pvParameter)
                 free(recv_cb->data);
                 if (ret == ESPNOW_DATA_BROADCAST) {
                     // pairing
-                    ESP_LOGI(TAG, "Receive %dth broadcast data from: "MACSTR", len: %d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len);
+                    ESP_LOGI(TAG, "Receive %dth broadcast data from: "MACSTR", len: %d, stage: %d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len, recv_state);
 
                     if (system_stage == ESP_RECV_STATE_AWAITING)
                     {
@@ -249,53 +252,55 @@ static void espnow_recv_task(void *pvParameter)
                             ESP_ERROR_CHECK( esp_now_add_peer(peer) );
                             free(peer);
                         }
-
+                        send_param->magic = recv_magic;
                         /* Indicates that the device has received broadcast ESPNOW data. */
+                        system_stage = ESP_RECV_STATE_RESPONDING;
                         send_param->state = system_stage;
-                        memcpy(send_param->dest_mac, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
+                        memcpy(send_param->dest_mac, s_broadcast_mac, ESP_NOW_ETH_ALEN);
                         espnow_recv_data_prepare(send_param);
-                        ESP_LOGI(TAG, "send data to "MACSTR"", MAC2STR(recv_cb->mac_addr));
+                        ESP_LOGI(TAG, "send Responding data to "MACSTR"", MAC2STR(recv_cb->mac_addr));
                         if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
                             ESP_LOGE(TAG, "Send error");
                             espnow_receiver_deinit(send_param);
                             vTaskDelete(NULL);
                         }
                     }
+                    else {}
+                }
+                else if (ret == ESPNOW_DATA_UNICAST && system_stage >= ESP_RECV_STATE_AWAITING) {
+                    ESP_LOGI(TAG, "Receive %dth unicast data from: "MACSTR", len: %d, stage: %d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len, recv_state);
+                    if (system_stage == ESP_RECV_STATE_CONFIRM) {system_stage = ESP_RECV_STATE_CONNECTED;}
                     else if (system_stage == ESP_RECV_STATE_RESPONDING && recv_state == system_stage && esp_now_is_peer_exist(recv_cb->mac_addr))
                     {
                         system_stage = ESP_RECV_STATE_CONFIRM;
                         send_param->state = system_stage;
                         memcpy(send_param->dest_mac, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
                         espnow_recv_data_prepare(send_param);
-                        ESP_LOGI(TAG, "send data to "MACSTR"", MAC2STR(recv_cb->mac_addr));
+                        ESP_LOGI(TAG, "send Confirm data to "MACSTR"", MAC2STR(recv_cb->mac_addr));
                         if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
                             ESP_LOGE(TAG, "Send error");
                             espnow_receiver_deinit(send_param);
                             vTaskDelete(NULL);
                         }
                     }
-                    else
+                    else if (system_stage == ESP_RECV_STATE_CONNECTED)
                     {
-                        // deal with mismatch state?
+                        // ESP_LOGI(TAG, "Receive %dth unicast data from: "MACSTR", len: %d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len);
+                        if (recv_seq == 900)
+                        {
+                            gettimeofday(&tv_now, NULL);
+                            int64_t time_us_end = (int64_t)tv_now.tv_sec * 1000000L + (int64_t)tv_now.tv_usec;
+                            ESP_LOGW(TAG, "Received 900 data; time usage: %lld us", time_us_end-time_us_start);
+                        }
+                        else if (recv_seq == 0) 
+                        {
+                            ESP_LOGW(TAG, "Start Rec data;");
+                            gettimeofday(&tv_now, NULL);
+                            time_us_start = (int64_t)tv_now.tv_sec * 1000000L + (int64_t)tv_now.tv_usec;
+                        }
+                        /* If receive unicast ESPNOW data, also stop sending broadcast ESPNOW data. */
+                        // send_param->broadcast = false;
                     }
-                }
-                else if (ret == ESPNOW_DATA_UNICAST && system_stage >= ESP_RECV_STATE_CONFIRM) {
-                    if (system_stage == ESP_RECV_STATE_CONFIRM) {system_stage = ESP_RECV_STATE_CONNECTED;}
-                    // ESP_LOGI(TAG, "Receive %dth unicast data from: "MACSTR", len: %d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len);
-                    if (recv_seq == 900)
-                    {
-                        gettimeofday(&tv_now, NULL);
-                        int64_t time_us_end = (int64_t)tv_now.tv_sec * 1000000L + (int64_t)tv_now.tv_usec;
-                        ESP_LOGW(TAG, "Received 900 data; time usage: %lld us", time_us_end-time_us_start);
-                    }
-                    else if (recv_seq == 0) 
-                    {
-                        ESP_LOGW(TAG, "Start Rec data;");
-                        gettimeofday(&tv_now, NULL);
-                        time_us_start = (int64_t)tv_now.tv_sec * 1000000L + (int64_t)tv_now.tv_usec;
-                    }
-                    /* If receive unicast ESPNOW data, also stop sending broadcast ESPNOW data. */
-                    // send_param->broadcast = false;
                 }
                 else {
                     ESP_LOGI(TAG, "Receive error data from: "MACSTR"", MAC2STR(recv_cb->mac_addr));
@@ -360,7 +365,7 @@ static esp_err_t espnow_receiver_init(void)
     send_param->state = 0;
     send_param->magic = esp_random();
     send_param->count = CONFIG_ESPNOW_SEND_COUNT;
-    send_param->delay = CONFIG_ESPNOW_SEND_DELAY;
+    send_param->delay = ESPNOW_CAST_SEND_DELAY;
     send_param->len = CONFIG_ESPNOW_SEND_LEN;
     send_param->buffer = malloc(CONFIG_ESPNOW_SEND_LEN);
     if (send_param->buffer == NULL) {
