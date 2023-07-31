@@ -30,7 +30,7 @@ static const uint8_t hid_configuration_descriptor[] = {
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
 
     // Interface number, string index, boot protocol, report descriptor len, EP In address, size & polling interval
-    TUD_HID_DESCRIPTOR(0, 4, false, sizeof(hid_report_descriptor), 0x81, 16, 10),
+    TUD_HID_DESCRIPTOR(0, 4, false, sizeof(hid_report_descriptor), 0x81, 16, 1),
 };
 
 /********* TinyUSB HID callbacks ***************/
@@ -71,15 +71,15 @@ static void app_send_hid_mouse(void)
     hid_mouse_input_report_queue_t evt;
     while (xQueueReceive(g_usbhid_queue, &evt, portMAX_DELAY) == pdTRUE)
     {// wait for the packing of data from usb
+		// ESP_LOGE(TAG, "TUD: %d, Mov: %d\r", tud_mounted(), evt.displacement[1]);
         if (tud_mounted())
-		{
+		{			
 			buffer[0] = evt.buttons.val;                    // Buttons
 			buffer[1] = evt.z_displacement;                 // Wheel
 			buffer[2] = evt.displacement[0];                // X
 			buffer[3] = evt.displacement[0] >> 8;           // X lower
 			buffer[4] = evt.displacement[1];                // Y
 			buffer[5] = evt.displacement[1] >> 8;           // Y lower
-			// ESP_LOGI(HID_LE_PRF_TAG, "Leftclick: %d\r", buffer[0]);
 			tud_hid_report(HID_ITF_PROTOCOL_MOUSE, buffer, HID_MOUSE_IN_RPT_LEN);
 		}
         // send calling queue back to usb func and ask for next commands for send
@@ -101,8 +101,9 @@ void wifi_sniffer_init(void)
 	ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
 	ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_NULL) );
 	ESP_ERROR_CHECK( esp_wifi_start() );
-	esp_wifi_set_promiscuous(true);
+	wifi_sniffer_set_channel(channel);
 	esp_wifi_set_promiscuous_rx_cb(&wifi_sniffer_packet_handler);
+	esp_wifi_set_promiscuous(true);
 }
 
 void wifi_sniffer_set_channel(uint8_t channel)
@@ -129,15 +130,31 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
 	const wifi_ieee80211_packet_t *ipkt = (wifi_ieee80211_packet_t *)ppkt->payload;
 	const wifi_ieee80211_mac_hdr_t *hdr = &ipkt->hdr;
 
-	hid_mouse_input_report_queue_t *mouse_report = (hid_mouse_input_report_queue_t *)ipkt;
+	hid_mouse_input_report_queue_t *mouse_report = (hid_mouse_input_report_queue_t *)ipkt->payload;
 
-	if (wifi_check_mac_address(paired_mac, hdr->addr2))
+	// ESP_LOGE(TAG, "Recv");
+	if (memcmp(paired_mac, hdr->addr2, sizeof(uint8_t)*6) == 0)
 	{
+		// ESP_LOGE(TAG, "Match, mac= %02x:%02x:%02x:%02x:%02x:%02x", hdr->addr2[0],hdr->addr2[1],hdr->addr2[2],hdr->addr2[3],hdr->addr2[4],hdr->addr2[5]);
 		if (ppkt->rx_ctrl.sig_len < sizeof(hid_mouse_input_report_queue_t))
 			return;
-		xQueueSend(g_usbhid_queue, &mouse_report, 0);
+		xQueueSend(g_usbhid_queue, ipkt->payload, 0);
+		/*
+		if (packet_counter < 10)
+		{
+			packet_counter += 1;
+		}
+		else
+		{
+			gettimeofday(&tv_next, NULL);
+			time_us_start = (int64_t)tv_now.tv_sec * 1000000L + (int64_t)tv_now.tv_usec;
+        	time_us_end = (int64_t)tv_next.tv_sec * 1000000L + (int64_t)tv_next.tv_usec; 
+        	ESP_LOGW(TAG, "10 packet Time: %lld", time_us_end - time_us_start);
+			tv_now = tv_next;
+			packet_counter = 0;
+		}
+		*/
 	}
-	else return;
 	/*
 	printf("PACKET TYPE=%s, CHAN=%02d, RSSI=%02d,"
 		" RECV ADDR=%02x:%02x:%02x:%02x:%02x:%02x,"
@@ -193,6 +210,11 @@ void app_main(void)
 	task_created = xTaskCreate(app_send_hid_mouse, "usb_events", 4096, NULL, 3, &usb_events_task_handle);
     assert(task_created);
 
+	packet_counter = 0;
+	gettimeofday(&tv_now, NULL);
 	wifi_sniffer_init();
-	wifi_sniffer_set_channel(channel);
+	while (true)
+	{
+		vTaskDelay(1000 / portTICK_PERIOD_MS);
+	}
 }

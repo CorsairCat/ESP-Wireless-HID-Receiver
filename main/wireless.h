@@ -18,6 +18,7 @@
 #include "esp_event.h"
 #include "tinyusb.h"
 #include "class/hid/hid_device.h"
+#include <sys/time.h>
 
 #define WIFI_CHANNEL_SWITCH_INTERVAL  (500)
 #define WIFI_CHANNEL_MAX               (13)
@@ -117,5 +118,11 @@ typedef struct {
   HID_COLLECTION_END \
 
 static QueueHandle_t g_usbhid_queue;
+
+struct timeval tv_now;
+struct timeval tv_next;
+int64_t time_us_start;
+int64_t time_us_end;
+int8_t packet_counter;
 
 #endif
